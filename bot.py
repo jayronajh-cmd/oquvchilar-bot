@@ -19,57 +19,85 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 
-# Faqat siz (ADMIN_ID) botdan foydalana olasiz
+# Only you (ADMIN_ID) can use this bot
 router.message.filter(F.from_user.id == ADMIN_ID)
 router.callback_query.filter(F.from_user.id == ADMIN_ID)
 
 dp.include_router(router)
 
+DIVIDER = "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+
+TRACK_EMOJI = {
+    "ingliz": "📘",
+    "fizika": "🧪",
+    "ona_tili": "📖",
+}
+
 
 # ============================================================================
-# FSM holatlari
+# FSM states
 # ============================================================================
 
 class AddStudent(StatesGroup):
-    ism = State()
-    yonalish = State()
-    jinsi = State()
+    name = State()
+    track = State()
+    gender = State()
 
 
 class BulkAdd(StatesGroup):
-    matn = State()
+    text = State()
 
 
 class LeaveStudent(StatesGroup):
-    qidiruv = State()
-    turi = State()
-    sabab = State()
+    search = State()
+    type_ = State()
+    reason = State()
 
 
 class ReturnStudent(StatesGroup):
-    qidiruv = State()
+    search = State()
 
 
 class SearchStudent(StatesGroup):
-    qidiruv = State()
+    search = State()
 
 
 # ============================================================================
-# Yordamchi funksiyalar
+# Keyboards
 # ============================================================================
 
-def yonalish_kb(prefix="yon"):
+def main_menu_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Add student", callback_data="menu:add")
+    kb.button(text="📥 Bulk add", callback_data="menu:bulk")
+    kb.button(text="📋 List", callback_data="menu:list")
+    kb.button(text="🔍 Search", callback_data="menu:search")
+    kb.button(text="➖ Mark left", callback_data="menu:leave")
+    kb.button(text="🔁 Mark returned", callback_data="menu:return")
+    kb.button(text="📤 Left students", callback_data="menu:leavers")
+    kb.button(text="📊 Statistics", callback_data="menu:stats")
+    kb.adjust(2)
+    return kb.as_markup()
+
+
+def back_to_menu_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🏠 Main menu", callback_data="menu:home")
+    return kb.as_markup()
+
+
+def track_kb(prefix="trk"):
     kb = InlineKeyboardBuilder()
     for code, name in YONALISHLAR.items():
-        kb.button(text=name, callback_data=f"{prefix}:{code}")
+        kb.button(text=f"{TRACK_EMOJI.get(code, '')} {name}", callback_data=f"{prefix}:{code}")
     kb.adjust(1)
     return kb.as_markup()
 
 
-def jinsi_kb(prefix="jin"):
+def gender_kb(prefix="gen"):
     kb = InlineKeyboardBuilder()
-    for code, name in JINSLAR.items():
-        kb.button(text=name, callback_data=f"{prefix}:{code}")
+    kb.button(text=f"👦 {JINSLAR['ogil']}", callback_data=f"{prefix}:ogil")
+    kb.button(text=f"👧 {JINSLAR['qiz']}", callback_data=f"{prefix}:qiz")
     kb.adjust(2)
     return kb.as_markup()
 
@@ -77,214 +105,353 @@ def jinsi_kb(prefix="jin"):
 def students_kb(students, prefix):
     kb = InlineKeyboardBuilder()
     for s in students:
-        label = f"{s['ism_familiya']} ({YONALISHLAR.get(s['yonalish'], s['yonalish'])})"
-        kb.button(text=label, callback_data=f"{prefix}:{s['id']}")
+        emoji = TRACK_EMOJI.get(s["yonalish"], "")
+        gender_icon = "👦" if s["jinsi"] == "ogil" else "👧"
+        kb.button(text=f"{gender_icon} {s['ism_familiya']} {emoji}", callback_data=f"{prefix}:{s['id']}")
     kb.adjust(1)
     return kb.as_markup()
 
 
-def student_card(row, tarix):
-    lines = [
-        f"👤 <b>{row['ism_familiya']}</b>",
-        f"Yo'nalish: {YONALISHLAR.get(row['yonalish'], row['yonalish'])}",
-        f"Jinsi: {JINSLAR.get(row['jinsi'], row['jinsi'])}",
-        f"Holati: {holat_belgisi(row['holati'])}",
-        f"Qo'shilgan sana: {row['qoshilgan_sana']}",
-    ]
-    if row["holati"] in ("ketgan", "sababli"):
-        kunlar = db.kun_farqi(row["qoshilgan_sana"], row["ketgan_sana"])
-        lines.append(f"Ketgan sana: {row['ketgan_sana']} (jami {kunlar} kun o'qigan)")
-        if row["sabab"]:
-            lines.append(f"Sabab: {row['sabab']}")
-    else:
-        kunlar = db.kun_farqi(row["qoshilgan_sana"])
-        lines.append(f"Hozirgacha: {kunlar} kundan beri o'qiyapti")
+# ============================================================================
+# Text builders
+# ============================================================================
 
-    if tarix:
-        lines.append("\n<b>Tarix:</b>")
-        harakat_nomi = {"qoshildi": "➕ Qo'shildi", "ketdi": "➖ Ketdi", "qaytdi": "🔁 Qaytdi"}
-        for t in tarix:
-            izoh = f" — {t['izoh']}" if t["izoh"] else ""
-            lines.append(f"{t['sana']}: {harakat_nomi.get(t['harakat'], t['harakat'])}{izoh}")
-
-    return "\n".join(lines)
-
-
-def holat_belgisi(holati):
-    return {"faol": "✅ Faol", "ketgan": "🔴 Ketgan", "sababli": "🟡 Vaqtincha ketgan"}.get(
+def status_label(holati):
+    return {"faol": "✅ Active", "ketgan": "🔴 Left", "sababli": "🟡 Left temporarily"}.get(
         holati, holati
     )
 
 
-# ============================================================================
-# /start va umumiy
-# ============================================================================
+def student_card(row, history):
+    gender_icon = "👦" if row["jinsi"] == "ogil" else "👧"
+    emoji = TRACK_EMOJI.get(row["yonalish"], "")
+    lines = [
+        f"{gender_icon} <b>{row['ism_familiya']}</b>",
+        DIVIDER,
+        f"{emoji} Track: <b>{YONALISHLAR.get(row['yonalish'], row['yonalish'])}</b>",
+        f"⚧ Gender: {JINSLAR.get(row['jinsi'], row['jinsi'])}",
+        f"📌 Status: {status_label(row['holati'])}",
+        f"📅 Joined: {row['qoshilgan_sana']}",
+    ]
+    if row["holati"] in ("ketgan", "sababli"):
+        days = db.kun_farqi(row["qoshilgan_sana"], row["ketgan_sana"])
+        lines.append(f"📅 Left: {row['ketgan_sana']}  ⏱ studied {days} days")
+        if row["sabab"]:
+            lines.append(f"📝 Reason: {row['sabab']}")
+    else:
+        days = db.kun_farqi(row["qoshilgan_sana"])
+        lines.append(f"⏱ Studying for {days} days so far")
 
-HELP_TEXT = (
-    "📋 <b>O'quvchilar hisobi boti</b>\n\n"
-    "/oquvchi_qoshish — bitta o'quvchi qo'shish\n"
-    "/royxat_yukla — bir nechta o'quvchini birdaniga qo'shish\n"
-    "/royxat — faol o'quvchilar ro'yxati\n"
-    "/qidir — o'quvchini ism bo'yicha qidirish (to'liq ma'lumot)\n"
-    "/ketdi — o'quvchini ketganlar ro'yxatiga qo'shish\n"
-    "/qaytdi — ketgan/vaqtincha ketgan o'quvchini qaytarish\n"
-    "/ketganlar — ketganlar va vaqtincha ketganlar ro'yxati\n"
-    "/statistika — umumiy statistika\n"
-    "/bekor — joriy amalni bekor qilish"
-)
+    if history:
+        lines.append(DIVIDER)
+        lines.append("🕘 <b>History</b>")
+        action_name = {"qoshildi": "➕ Joined", "ketdi": "➖ Left", "qaytdi": "🔁 Returned"}
+        for t in history:
+            note = f" — {t['izoh']}" if t["izoh"] else ""
+            lines.append(f"  {t['sana']} · {action_name.get(t['harakat'], t['harakat'])}{note}")
 
-
-@router.message(CommandStart())
-async def start(message: Message):
-    await message.answer(HELP_TEXT, parse_mode="HTML")
-
-
-@router.message(Command("bekor"))
-async def cancel(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer("Bekor qilindi.")
-
-
-# ============================================================================
-# Bitta o'quvchi qo'shish
-# ============================================================================
-
-@router.message(Command("oquvchi_qoshish"))
-async def add_student_start(message: Message, state: FSMContext):
-    await state.set_state(AddStudent.ism)
-    await message.answer("O'quvchining ism va familiyasini yuboring:")
+    return "\n".join(lines)
 
 
-@router.message(AddStudent.ism)
-async def add_student_ism(message: Message, state: FSMContext):
-    await state.update_data(ism=message.text.strip())
-    await state.set_state(AddStudent.yonalish)
-    await message.answer("Yo'nalishni tanlang:", reply_markup=yonalish_kb())
+def bar(part, total, length=8):
+    """Simple text progress bar: ▓▓▓▓░░░░"""
+    if total == 0:
+        return "░" * length
+    filled = round((part / total) * length)
+    return "▓" * filled + "░" * (length - filled)
 
 
-@router.callback_query(AddStudent.yonalish, F.data.startswith("yon:"))
-async def add_student_yonalish(callback: CallbackQuery, state: FSMContext):
-    code = callback.data.split(":", 1)[1]
-    await state.update_data(yonalish=code)
-    await state.set_state(AddStudent.jinsi)
-    await callback.message.edit_text("Jinsini tanlang:", reply_markup=jinsi_kb())
-    await callback.answer()
-
-
-@router.callback_query(AddStudent.jinsi, F.data.startswith("jin:"))
-async def add_student_jinsi(callback: CallbackQuery, state: FSMContext):
-    jinsi = callback.data.split(":", 1)[1]
-    data = await state.get_data()
-    db.add_student(data["ism"], data["yonalish"], jinsi)
-    await state.clear()
-    await callback.message.edit_text(f"✅ <b>{data['ism']}</b> qo'shildi!", parse_mode="HTML")
-    await callback.answer()
-
-
-# ============================================================================
-# Ko'plab o'quvchini birdaniga qo'shish
-# ============================================================================
-
-BULK_FORMAT_HELP = (
-    "Har bir o'quvchini yangi qatordan, quyidagi formatda yuboring:\n\n"
-    "<code>Ism Familiya; yonalish; jinsi</code>\n\n"
-    "Yo'nalish uchun: <b>ingliz</b>, <b>fizika</b> yoki <b>ona_tili</b>\n"
-    "Jinsi uchun: <b>ogil</b> yoki <b>qiz</b>\n\n"
-    "Misol:\n"
-    "<code>Aliyev Vali; ingliz; ogil\n"
-    "Karimova Nodira; fizika; qiz\n"
-    "Yusupov Sardor; ona_tili; ogil</code>"
-)
-
-
-@router.message(Command("royxat_yukla"))
-async def bulk_add_start(message: Message, state: FSMContext):
-    await state.set_state(BulkAdd.matn)
-    await message.answer(BULK_FORMAT_HELP, parse_mode="HTML")
-
-
-@router.message(BulkAdd.matn)
-async def bulk_add_process(message: Message, state: FSMContext):
-    lines = [l.strip() for l in message.text.splitlines() if l.strip()]
-    qoshildi, xato = [], []
-
-    for line in lines:
-        parts = [p.strip() for p in line.split(";")]
-        if len(parts) != 3:
-            xato.append(f"«{line}» — format noto'g'ri (3 qism kerak)")
-            continue
-        ism, yon_raw, jin_raw = parts
-        yon_code = None
-        for code in YONALISHLAR:
-            if code in yon_raw.lower() or yon_raw.lower() in code:
-                yon_code = code
-                break
-        jin_code = None
-        if "qiz" in jin_raw.lower():
-            jin_code = "qiz"
-        elif "ogil" in jin_raw.lower() or "o'g" in jin_raw.lower() or "ug'il" in jin_raw.lower():
-            jin_code = "ogil"
-
-        if not ism or not yon_code or not jin_code:
-            xato.append(f"«{line}» — yo'nalish yoki jinsi aniqlanmadi")
-            continue
-
-        db.add_student(ism, yon_code, jin_code)
-        qoshildi.append(ism)
-
-    await state.clear()
-    natija = f"✅ Qo'shildi: {len(qoshildi)} ta o'quvchi\n"
-    if qoshildi:
-        natija += "\n".join(f"• {ism}" for ism in qoshildi)
-    if xato:
-        natija += "\n\n⚠️ Xatoliklar:\n" + "\n".join(f"• {x}" for x in xato)
-    await message.answer(natija)
-
-
-# ============================================================================
-# Ro'yxat (faol o'quvchilar)
-# ============================================================================
-
-@router.message(Command("royxat"))
-async def show_list(message: Message):
+def build_list_texts():
+    texts = []
     for code, name in YONALISHLAR.items():
         students = db.get_list(holati="faol", yonalish=code)
         if not students:
             continue
-        lines = [f"<b>{name}</b> ({len(students)} ta):"]
+        emoji = TRACK_EMOJI.get(code, "")
+        lines = [f"{emoji} <b>{name}</b>  ({len(students)})", DIVIDER]
         for s in students:
-            belgi = "👦" if s["jinsi"] == "ogil" else "👧"
-            lines.append(f"{belgi} {s['ism_familiya']}")
-        await message.answer("\n".join(lines), parse_mode="HTML")
+            icon = "👦" if s["jinsi"] == "ogil" else "👧"
+            lines.append(f"{icon} {s['ism_familiya']}")
+        texts.append("\n".join(lines))
+    if not texts:
+        texts.append("📭 No active students yet.")
+    return texts
 
-    jami = db.get_list(holati="faol")
-    if not jami:
-        await message.answer("Hozircha faol o'quvchilar yo'q.")
+
+def build_leavers_texts():
+    texts = []
+    temp_left = db.get_list(holati="sababli")
+    left = db.get_list(holati="ketgan")
+
+    if temp_left:
+        parts = ["🟡 <b>Left temporarily</b>  (may return)", DIVIDER]
+        for s in temp_left:
+            days = db.kun_farqi(s["qoshilgan_sana"], s["ketgan_sana"])
+            reason = f"\n   📝 {s['sabab']}" if s["sabab"] else ""
+            parts.append(
+                f"👤 <b>{s['ism_familiya']}</b>\n"
+                f"   📅 {s['qoshilgan_sana']} → {s['ketgan_sana']}  ⏱ {days} days{reason}"
+            )
+        texts.append("\n\n".join(parts))
+
+    if left:
+        parts = ["🔴 <b>Left for good</b>", DIVIDER]
+        for s in left:
+            days = db.kun_farqi(s["qoshilgan_sana"], s["ketgan_sana"])
+            reason = f"\n   📝 {s['sabab']}" if s["sabab"] else ""
+            parts.append(
+                f"👤 <b>{s['ism_familiya']}</b>\n"
+                f"   📅 {s['qoshilgan_sana']} → {s['ketgan_sana']}  ⏱ {days} days{reason}"
+            )
+        texts.append("\n\n".join(parts))
+
+    if not texts:
+        texts.append("🎉 No one has left yet.")
+    return texts
+
+
+def build_stats_text():
+    s = db.get_stats()
+    total = s["jami_faol"]
+
+    lines = [
+        "📊 <b>OVERALL STATISTICS</b>",
+        DIVIDER,
+        f"✅ Total active students: <b>{total}</b>",
+        "",
+        f"👦 Boys: <b>{s['ogil']}</b>   {bar(s['ogil'], total)}",
+        f"👧 Girls: <b>{s['qiz']}</b>   {bar(s['qiz'], total)}",
+        "",
+        "<b>By track:</b>",
+    ]
+    for code, name in YONALISHLAR.items():
+        count = s["yonalish_taqsimot"].get(code, 0)
+        emoji = TRACK_EMOJI.get(code, "")
+        lines.append(f"{emoji} {name}: <b>{count}</b>  {bar(count, total)}")
+
+    lines.append("")
+    lines.append(DIVIDER)
+    lines.append(f"🟡 Left temporarily: <b>{s['sababli_soni']}</b>")
+    lines.append(f"🔴 Left for good: <b>{s['ketgan_soni']}</b>")
+
+    return "\n".join(lines)
 
 
 # ============================================================================
-# Qidirish / to'liq ma'lumot
+# /start, /menu and general
 # ============================================================================
 
-@router.message(Command("qidir"))
+WELCOME_TEXT = (
+    "👋 <b>Hello, Teacher!</b>\n\n"
+    "📋 Welcome to your <b>Student Tracker Bot</b>.\n"
+    "Choose an option from the menu below:"
+)
+
+
+@router.message(CommandStart())
+async def start(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(WELCOME_TEXT, parse_mode="HTML", reply_markup=main_menu_kb())
+
+
+@router.message(Command("menu"))
+async def menu_cmd(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("🏠 <b>Main menu</b>", parse_mode="HTML", reply_markup=main_menu_kb())
+
+
+@router.callback_query(F.data == "menu:home")
+async def menu_home(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("🏠 <b>Main menu</b>", parse_mode="HTML", reply_markup=main_menu_kb())
+    await callback.answer()
+
+
+@router.message(Command("cancel"))
+async def cancel(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("❌ Cancelled.", reply_markup=back_to_menu_kb())
+
+
+# ============================================================================
+# Add one student
+# ============================================================================
+
+ADD_PROMPT = "➕ <b>New student</b>\n\nSend the student's full name:"
+
+
+@router.message(Command("add_student"))
+async def add_student_start(message: Message, state: FSMContext):
+    await state.set_state(AddStudent.name)
+    await message.answer(ADD_PROMPT, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "menu:add")
+async def menu_add(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(AddStudent.name)
+    await callback.message.edit_text(ADD_PROMPT, parse_mode="HTML")
+    await callback.answer()
+
+
+@router.message(AddStudent.name)
+async def add_student_name(message: Message, state: FSMContext):
+    await state.update_data(name=message.text.strip())
+    await state.set_state(AddStudent.track)
+    await message.answer("📚 Choose the track:", reply_markup=track_kb())
+
+
+@router.callback_query(AddStudent.track, F.data.startswith("trk:"))
+async def add_student_track(callback: CallbackQuery, state: FSMContext):
+    code = callback.data.split(":", 1)[1]
+    await state.update_data(track=code)
+    await state.set_state(AddStudent.gender)
+    await callback.message.edit_text("⚧ Choose gender:", reply_markup=gender_kb())
+    await callback.answer()
+
+
+@router.callback_query(AddStudent.gender, F.data.startswith("gen:"))
+async def add_student_gender(callback: CallbackQuery, state: FSMContext):
+    gender = callback.data.split(":", 1)[1]
+    data = await state.get_data()
+    db.add_student(data["name"], data["track"], gender)
+    await state.clear()
+    emoji = TRACK_EMOJI.get(data["track"], "")
+    await callback.message.edit_text(
+        f"✅ <b>{data['name']}</b> added!\n{emoji} {YONALISHLAR.get(data['track'], '')}",
+        parse_mode="HTML",
+        reply_markup=back_to_menu_kb(),
+    )
+    await callback.answer()
+
+
+# ============================================================================
+# Bulk add students
+# ============================================================================
+
+BULK_FORMAT_HELP = (
+    "📥 <b>Bulk add students</b>\n\n"
+    "Send each student on a new line, in this format:\n\n"
+    "<code>Full Name; track; gender</code>\n\n"
+    "Track: <b>english</b>, <b>physics</b> or <b>native</b>\n"
+    "Gender: <b>boy</b> or <b>girl</b>\n\n"
+    "Example:\n"
+    "<code>Ali Valiyev; english; boy\n"
+    "Nodira Karimova; physics; girl\n"
+    "Sardor Yusupov; native; boy</code>"
+)
+
+
+@router.message(Command("bulk_add"))
+async def bulk_add_start(message: Message, state: FSMContext):
+    await state.set_state(BulkAdd.text)
+    await message.answer(BULK_FORMAT_HELP, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "menu:bulk")
+async def menu_bulk(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(BulkAdd.text)
+    await callback.message.edit_text(BULK_FORMAT_HELP, parse_mode="HTML")
+    await callback.answer()
+
+
+@router.message(BulkAdd.text)
+async def bulk_add_process(message: Message, state: FSMContext):
+    lines = [l.strip() for l in message.text.splitlines() if l.strip()]
+    added, errors = [], []
+
+    for line in lines:
+        parts = [p.strip() for p in line.split(";")]
+        if len(parts) != 3:
+            errors.append(f"«{line}» — wrong format (3 parts needed)")
+            continue
+        name, track_raw, gender_raw = parts
+        track_raw_l = track_raw.lower()
+        track_code = None
+        if "english" in track_raw_l or "ingliz" in track_raw_l:
+            track_code = "ingliz"
+        elif "physic" in track_raw_l or "fizika" in track_raw_l:
+            track_code = "fizika"
+        elif "native" in track_raw_l or "ona" in track_raw_l:
+            track_code = "ona_tili"
+
+        gender_raw_l = gender_raw.lower()
+        gender_code = None
+        if "girl" in gender_raw_l or "female" in gender_raw_l or "qiz" in gender_raw_l:
+            gender_code = "qiz"
+        elif "boy" in gender_raw_l or "male" in gender_raw_l or "ogil" in gender_raw_l or "o'g" in gender_raw_l:
+            gender_code = "ogil"
+
+        if not name or not track_code or not gender_code:
+            errors.append(f"«{line}» — could not detect track or gender")
+            continue
+
+        db.add_student(name, track_code, gender_code)
+        added.append(name)
+
+    await state.clear()
+    result = f"✅ <b>Added: {len(added)} student(s)</b>\n{DIVIDER}\n"
+    if added:
+        result += "\n".join(f"• {name}" for name in added)
+    if errors:
+        result += "\n\n⚠️ <b>Errors:</b>\n" + "\n".join(f"• {e}" for e in errors)
+    await message.answer(result, parse_mode="HTML", reply_markup=back_to_menu_kb())
+
+
+# ============================================================================
+# List (active students)
+# ============================================================================
+
+@router.message(Command("list"))
+async def show_list(message: Message):
+    texts = build_list_texts()
+    for i, t in enumerate(texts):
+        kb = back_to_menu_kb() if i == len(texts) - 1 else None
+        await message.answer(t, parse_mode="HTML", reply_markup=kb)
+
+
+@router.callback_query(F.data == "menu:list")
+async def menu_list(callback: CallbackQuery):
+    await callback.answer()
+    texts = build_list_texts()
+    await callback.message.delete()
+    for i, t in enumerate(texts):
+        kb = back_to_menu_kb() if i == len(texts) - 1 else None
+        await callback.message.answer(t, parse_mode="HTML", reply_markup=kb)
+
+
+# ============================================================================
+# Search / full info
+# ============================================================================
+
+SEARCH_PROMPT = "🔍 <b>Search</b>\n\nType the student's name:"
+
+
+@router.message(Command("search"))
 async def search_start(message: Message, state: FSMContext):
-    await state.set_state(SearchStudent.qidiruv)
-    await message.answer("Ism yoki familiyani yozing:")
+    await state.set_state(SearchStudent.search)
+    await message.answer(SEARCH_PROMPT, parse_mode="HTML")
 
 
-@router.message(SearchStudent.qidiruv)
+@router.callback_query(F.data == "menu:search")
+async def menu_search(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(SearchStudent.search)
+    await callback.message.edit_text(SEARCH_PROMPT, parse_mode="HTML")
+    await callback.answer()
+
+
+@router.message(SearchStudent.search)
 async def search_process(message: Message, state: FSMContext):
     await state.clear()
     results = db.search_students(message.text.strip())
     if not results:
-        await message.answer("Hech kim topilmadi.")
+        await message.answer("😕 No one found.", reply_markup=back_to_menu_kb())
         return
     if len(results) == 1:
-        row, tarix = db.get_student(results[0]["id"])
-        await message.answer(student_card(row, tarix), parse_mode="HTML")
+        row, history = db.get_student(results[0]["id"])
+        await message.answer(student_card(row, history), parse_mode="HTML", reply_markup=back_to_menu_kb())
     else:
         await message.answer(
-            f"{len(results)} ta natija topildi, birini tanlang:",
+            f"🔍 {len(results)} results found, choose one:",
             reply_markup=students_kb(results, "info"),
         )
 
@@ -292,157 +459,177 @@ async def search_process(message: Message, state: FSMContext):
 @router.callback_query(F.data.startswith("info:"))
 async def search_select(callback: CallbackQuery):
     student_id = int(callback.data.split(":", 1)[1])
-    row, tarix = db.get_student(student_id)
-    await callback.message.edit_text(student_card(row, tarix), parse_mode="HTML")
-    await callback.answer()
-
-
-# ============================================================================
-# Ketdi (butunlay yoki vaqtincha)
-# ============================================================================
-
-@router.message(Command("ketdi"))
-async def leave_start(message: Message, state: FSMContext):
-    await state.set_state(LeaveStudent.qidiruv)
-    await message.answer("Kim ketganini ism/familiya bilan yozing:")
-
-
-@router.message(LeaveStudent.qidiruv)
-async def leave_search(message: Message, state: FSMContext):
-    results = db.search_students(message.text.strip(), holatlar=["faol"])
-    if not results:
-        await message.answer("Faol o'quvchilar orasida topilmadi. Qaytadan urinib ko'ring yoki /bekor.")
-        return
-    await state.update_data(candidates={str(s["id"]): s["ism_familiya"] for s in results})
-    await message.answer("Kimni tanlaysiz?", reply_markup=students_kb(results, "ketdi_tanlash"))
-
-
-@router.callback_query(F.data.startswith("ketdi_tanlash:"))
-async def leave_pick(callback: CallbackQuery, state: FSMContext):
-    student_id = callback.data.split(":", 1)[1]
-    await state.update_data(student_id=student_id)
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🔴 Butunlay ketdi", callback_data="ketdi_turi:butunlay")
-    kb.button(text="🟡 Vaqtincha (sababli)", callback_data="ketdi_turi:vaqtincha")
-    kb.adjust(1)
-    await state.set_state(LeaveStudent.turi)
-    await callback.message.edit_text("Qanday ketdi?", reply_markup=kb.as_markup())
-    await callback.answer()
-
-
-@router.callback_query(LeaveStudent.turi, F.data.startswith("ketdi_turi:"))
-async def leave_turi(callback: CallbackQuery, state: FSMContext):
-    turi = callback.data.split(":", 1)[1]
-    await state.update_data(turi=turi)
-    await state.set_state(LeaveStudent.sabab)
+    row, history = db.get_student(student_id)
     await callback.message.edit_text(
-        "Sababini yozing (bo'lmasa «yo'q» deb yozing):"
+        student_card(row, history), parse_mode="HTML", reply_markup=back_to_menu_kb()
     )
     await callback.answer()
 
 
-@router.message(LeaveStudent.sabab)
-async def leave_sabab(message: Message, state: FSMContext):
+# ============================================================================
+# Mark left (permanent or temporary)
+# ============================================================================
+
+LEAVE_PROMPT = "➖ <b>Student left</b>\n\nType the name of the student who left:"
+
+
+@router.message(Command("leave"))
+async def leave_start(message: Message, state: FSMContext):
+    await state.set_state(LeaveStudent.search)
+    await message.answer(LEAVE_PROMPT, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "menu:leave")
+async def menu_leave(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(LeaveStudent.search)
+    await callback.message.edit_text(LEAVE_PROMPT, parse_mode="HTML")
+    await callback.answer()
+
+
+@router.message(LeaveStudent.search)
+async def leave_search(message: Message, state: FSMContext):
+    results = db.search_students(message.text.strip(), holatlar=["faol"])
+    if not results:
+        await message.answer(
+            "😕 No match among active students. Try again or /cancel.",
+        )
+        return
+    await state.update_data(candidates={str(s["id"]): s["ism_familiya"] for s in results})
+    await message.answer("Which student?", reply_markup=students_kb(results, "leave_pick"))
+
+
+@router.callback_query(F.data.startswith("leave_pick:"))
+async def leave_pick(callback: CallbackQuery, state: FSMContext):
+    student_id = callback.data.split(":", 1)[1]
+    await state.update_data(student_id=student_id)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔴 Left for good", callback_data="leave_type:permanent")
+    kb.button(text="🟡 Temporary (with reason)", callback_data="leave_type:temporary")
+    kb.adjust(1)
+    await state.set_state(LeaveStudent.type_)
+    await callback.message.edit_text("How did they leave?", reply_markup=kb.as_markup())
+    await callback.answer()
+
+
+@router.callback_query(LeaveStudent.type_, F.data.startswith("leave_type:"))
+async def leave_type(callback: CallbackQuery, state: FSMContext):
+    leave_kind = callback.data.split(":", 1)[1]  # "permanent" or "temporary"
+    await state.update_data(leave_kind=leave_kind)
+    await state.set_state(LeaveStudent.reason)
+    await callback.message.edit_text("📝 Type the reason (or send «no» if none):")
+    await callback.answer()
+
+
+@router.message(LeaveStudent.reason)
+async def leave_reason(message: Message, state: FSMContext):
     data = await state.get_data()
-    sabab = message.text.strip()
-    if sabab.lower() in ("yo'q", "yoq", "-"):
-        sabab = None
-    db.mark_left(int(data["student_id"]), data["turi"], sabab)
-    ism = data["candidates"].get(data["student_id"], "O'quvchi")
+    reason = message.text.strip()
+    if reason.lower() in ("no", "none", "-", "yo'q", "yoq"):
+        reason = None
+    turi = "butunlay" if data["leave_kind"] == "permanent" else "vaqtincha"
+    db.mark_left(int(data["student_id"]), turi, reason)
+    name = data["candidates"].get(data["student_id"], "Student")
     await state.clear()
-    turi_matn = "butunlay ketdi" if data["turi"] == "butunlay" else "vaqtincha (sababli) ketdi"
-    await message.answer(f"✅ <b>{ism}</b> {turi_matn} deb belgilandi.", parse_mode="HTML")
+    if data["leave_kind"] == "permanent":
+        label, icon = "left for good", "🔴"
+    else:
+        label, icon = "left temporarily", "🟡"
+    await message.answer(
+        f"{icon} <b>{name}</b> marked as {label}.",
+        parse_mode="HTML",
+        reply_markup=back_to_menu_kb(),
+    )
 
 
 # ============================================================================
-# Qaytdi
+# Mark returned
 # ============================================================================
 
-@router.message(Command("qaytdi"))
+RETURN_PROMPT = "🔁 <b>Student returned</b>\n\nType the name of the student who came back:"
+
+
+@router.message(Command("return"))
 async def return_start(message: Message, state: FSMContext):
-    await state.set_state(ReturnStudent.qidiruv)
-    await message.answer("Kim qaytganini ism/familiya bilan yozing:")
+    await state.set_state(ReturnStudent.search)
+    await message.answer(RETURN_PROMPT, parse_mode="HTML")
 
 
-@router.message(ReturnStudent.qidiruv)
+@router.callback_query(F.data == "menu:return")
+async def menu_return(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(ReturnStudent.search)
+    await callback.message.edit_text(RETURN_PROMPT, parse_mode="HTML")
+    await callback.answer()
+
+
+@router.message(ReturnStudent.search)
 async def return_search(message: Message, state: FSMContext):
     results = db.search_students(message.text.strip(), holatlar=["ketgan", "sababli"])
     await state.clear()
     if not results:
-        await message.answer("Ketganlar orasida topilmadi.")
+        await message.answer("😕 No match among students who left.", reply_markup=back_to_menu_kb())
         return
-    await message.answer("Kimni qaytaramiz?", reply_markup=students_kb(results, "qaytdi_tanlash"))
+    await message.answer("Who is returning?", reply_markup=students_kb(results, "return_pick"))
 
 
-@router.callback_query(F.data.startswith("qaytdi_tanlash:"))
+@router.callback_query(F.data.startswith("return_pick:"))
 async def return_pick(callback: CallbackQuery):
     student_id = int(callback.data.split(":", 1)[1])
     row, _ = db.get_student(student_id)
     db.mark_returned(student_id)
-    await callback.message.edit_text(f"🔁 <b>{row['ism_familiya']}</b> qaytib keldi!", parse_mode="HTML")
+    await callback.message.edit_text(
+        f"🔁 <b>{row['ism_familiya']}</b> is back!",
+        parse_mode="HTML",
+        reply_markup=back_to_menu_kb(),
+    )
     await callback.answer()
 
 
 # ============================================================================
-# Ketganlar ro'yxati
+# Left students list
 # ============================================================================
 
-@router.message(Command("ketganlar"))
+@router.message(Command("leavers"))
 async def leavers_list(message: Message):
-    ketgan = db.get_list(holati="ketgan")
-    sababli = db.get_list(holati="sababli")
+    texts = build_leavers_texts()
+    for i, t in enumerate(texts):
+        kb = back_to_menu_kb() if i == len(texts) - 1 else None
+        await message.answer(t, parse_mode="HTML", reply_markup=kb)
 
-    if sababli:
-        lines = ["🟡 <b>Vaqtincha ketganlar (qaytishi mumkin):</b>"]
-        for s in sababli:
-            kunlar = db.kun_farqi(s["qoshilgan_sana"], s["ketgan_sana"])
-            sabab = f" — {s['sabab']}" if s["sabab"] else ""
-            lines.append(f"• {s['ism_familiya']}: {s['qoshilgan_sana']} → {s['ketgan_sana']} ({kunlar} kun o'qigan){sabab}")
-        await message.answer("\n".join(lines), parse_mode="HTML")
 
-    if ketgan:
-        lines = ["🔴 <b>Butunlay ketganlar:</b>"]
-        for s in ketgan:
-            kunlar = db.kun_farqi(s["qoshilgan_sana"], s["ketgan_sana"])
-            sabab = f" — {s['sabab']}" if s["sabab"] else ""
-            lines.append(f"• {s['ism_familiya']}: {s['qoshilgan_sana']} → {s['ketgan_sana']} ({kunlar} kun o'qigan){sabab}")
-        await message.answer("\n".join(lines), parse_mode="HTML")
-
-    if not sababli and not ketgan:
-        await message.answer("Hozircha hech kim ketmagan. 🎉")
+@router.callback_query(F.data == "menu:leavers")
+async def menu_leavers(callback: CallbackQuery):
+    await callback.answer()
+    texts = build_leavers_texts()
+    await callback.message.delete()
+    for i, t in enumerate(texts):
+        kb = back_to_menu_kb() if i == len(texts) - 1 else None
+        await callback.message.answer(t, parse_mode="HTML", reply_markup=kb)
 
 
 # ============================================================================
-# Statistika
+# Statistics
 # ============================================================================
 
-@router.message(Command("statistika"))
+@router.message(Command("stats"))
 async def stats(message: Message):
-    s = db.get_stats()
-    lines = [
-        "📊 <b>Umumiy statistika</b>\n",
-        f"✅ Jami faol o'quvchilar: <b>{s['jami_faol']}</b>",
-        f"👦 O'g'il: {s['ogil']}   👧 Qiz: {s['qiz']}\n",
-        "<b>Yo'nalishlar bo'yicha:</b>",
-    ]
-    for code, name in YONALISHLAR.items():
-        soni = s["yonalish_taqsimot"].get(code, 0)
-        lines.append(f"• {name}: {soni} ta")
+    await message.answer(build_stats_text(), parse_mode="HTML", reply_markup=back_to_menu_kb())
 
-    lines.append("")
-    lines.append(f"🟡 Vaqtincha ketganlar: {s['sababli_soni']}")
-    lines.append(f"🔴 Butunlay ketganlar: {s['ketgan_soni']}")
 
-    await message.answer("\n".join(lines), parse_mode="HTML")
+@router.callback_query(F.data == "menu:stats")
+async def menu_stats(callback: CallbackQuery):
+    await callback.message.edit_text(
+        build_stats_text(), parse_mode="HTML", reply_markup=back_to_menu_kb()
+    )
+    await callback.answer()
 
 
 # ============================================================================
-# Ishga tushirish
+# Startup
 # ============================================================================
 
 async def main():
     db.init_db()
-    print("Bot ishga tushdi...")
+    print("Bot started...")
     await dp.start_polling(bot)
 
 
