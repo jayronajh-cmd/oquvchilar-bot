@@ -18,13 +18,15 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", "123456789"))
 DB_PATH = os.environ.get("DB_PATH", "oquvchilar.db")
 
 # Yo'nalishlar (kerak bo'lsa shu yerda o'zgartirishingiz mumkin)
+# Chap tomondagi kod (masalan "ingliz") — bazada saqlanadi, o'zgartirmang.
+# O'ng tomondagi nom — botda foydalanuvchiga ko'rinadigan matn.
 YONALISHLAR = {
-    "ingliz": "Matematika - Ingliz tili",
-    "fizika": "Matematika - Fizika",
-    "ona_tili": "Matematika - Ona tili",
+    "ingliz": "Math - English",
+    "fizika": "Math - Physics",
+    "ona_tili": "Math - Native Language",
 }
 
 JINSLAR = {
-    "ogil": "O'g'il",
-    "qiz": "Qiz",
+    "ogil": "Boy",
+    "qiz": "Girl",
 }
